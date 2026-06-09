@@ -1,0 +1,26 @@
+# OCT Metrics Extractor — Python environment requirements
+#
+# Minimum Python version: 3.10
+#   (uses dataclasses, pathlib, typing generics introduced in 3.9-3.10;
+#    tested and developed on Python 3.13)
+#
+# To set up a new environment:
+#   python -m venv .venv
+#   source .venv/bin/activate          # macOS / Linux
+#   .venv\Scripts\activate             # Windows
+#   pip install -r requirements.txt
+#
+# To verify your environment meets minimums without installing anything:
+#   pip install -r requirements.txt --dry-run
+#
+# Note: tkinter is part of the Python standard library but must be installed
+# separately on some systems (e.g. apt install python3-tk on Ubuntu/Debian,
+# or brew install python-tk@<version> on macOS with Homebrew Python).
+
+numpy>=1.24
+pandas>=1.5
+opencv-python>=4.5
+python-dateutil>=2.8
+pycryptodome>=3.10
+Pillow>=9.0
+matplotlib>=3.5
