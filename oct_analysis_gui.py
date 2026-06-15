@@ -23,6 +23,7 @@ from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
 import sys
 import multiprocessing
+import contextlib
 from pathlib import Path
 from multiprocessing import cpu_count
 import queue
@@ -60,7 +61,7 @@ class OCTAnalysisGUI:
         """Initialize GUI components."""
         self.root = root
         self.root.title("OCT Longitudinal RNFL Analysis")
-        self.root.geometry("900x900")
+        self._set_initial_window_size()
         
         # Set application icon
         try:
@@ -90,14 +91,31 @@ class OCTAnalysisGUI:
     
     def setup_gui(self):
         """Create all GUI components."""
-        # Main container with padding
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
+        # Outer container
+        container = ttk.Frame(self.root)
+        container.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Scrollable canvas so the full form remains accessible on smaller monitors
+        self.canvas = tk.Canvas(container, highlightthickness=0)
+        self.canvas.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.canvas_scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        self.canvas_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.canvas.configure(yscrollcommand=self.canvas_scrollbar.set)
+
         # Configure grid weights for resizing
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        # Main form hosted inside the canvas
+        main_frame = ttk.Frame(self.canvas, padding="10")
+        self._canvas_window = self.canvas.create_window((0, 0), window=main_frame, anchor="nw")
+        self.main_frame = main_frame
         main_frame.columnconfigure(1, weight=1)
+        main_frame.bind("<Configure>", self._on_main_frame_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self._bind_mousewheel(self.canvas)
         
         # Title
         title_label = ttk.Label(
@@ -382,25 +400,88 @@ class OCTAnalysisGUI:
         self.progress_label = ttk.Label(main_frame, textvariable=self.progress_var)
         self.progress_label.grid(row=6, column=0, columnspan=3, sticky=tk.W)
     
+    def _set_initial_window_size(self):
+        """Start smaller on low-resolution displays; full form remains reachable via scrolling."""
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        width = min(900, max(760, screen_w - 120))
+        height = min(900, max(650, screen_h - 120))
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(760, 650)
+
+    def _on_main_frame_configure(self, _event=None):
+        """Update the canvas scroll region whenever the form size changes."""
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        """Keep the embedded form width in sync with the visible canvas width."""
+        self.canvas.itemconfigure(self._canvas_window, width=event.width)
+
+    def _bind_mousewheel(self, widget):
+        widget.bind_all("<MouseWheel>", self._on_mousewheel)
+        widget.bind_all("<Button-4>", self._on_mousewheel)
+        widget.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _on_mousewheel(self, event):
+        """Cross-platform mouse-wheel scrolling for the outer form canvas."""
+        if getattr(event, 'num', None) == 4:
+            delta = -1
+        elif getattr(event, 'num', None) == 5:
+            delta = 1
+        else:
+            raw_delta = getattr(event, 'delta', 0)
+            if raw_delta == 0:
+                return
+            delta = -1 if raw_delta > 0 else 1
+        self.canvas.yview_scroll(delta, "units")
+
+    def _normalise_path(self, path_value: str) -> str:
+        """Return a Windows/macOS-safe normalised path string without requiring it to exist."""
+        if not path_value:
+            return ""
+        cleaned = path_value.strip().strip('"').strip("'")
+        return os.path.normpath(os.path.expanduser(cleaned))
+
+    @contextlib.contextmanager
+    def _safe_keep_system_awake(self, enabled: bool, reason: str):
+        """Best-effort wrapper so platform-specific keep-awake failures do not stop the pipeline."""
+        try:
+            with keep_system_awake(enabled, reason=reason):
+                yield
+        except Exception as exc:
+            self.log(f"Warning: keep_system_awake unavailable ({exc}). Continuing without sleep prevention.")
+            yield
+
     def browse_fda_dir(self):
         """Open dialog to select FDA files directory."""
         directory = filedialog.askdirectory(title="Select FDA Files Directory")
         if directory:
-            self.fda_dir_var.set(directory)
-            # Auto-suggest metadata file name based on directory
-            dir_name = Path(directory).name
+            self.fda_dir_var.set(self._normalise_path(directory))
+            # Auto-suggest a fully qualified metadata output path so the app does not
+            # try to write beside the executable (common Windows permission issue).
+            selected_dir = Path(directory)
+            dir_name = selected_dir.name
             suggested_name = f"metadata_{dir_name}.csv"
-            self.metadata_output_var.set(suggested_name)
+            self.metadata_output_var.set(str(selected_dir / suggested_name))
+
+            # Also pre-fill a sensible results directory if the field is still empty.
+            if not self.results_dir_var.get():
+                self.results_dir_var.set(str(selected_dir / "results"))
     
     def browse_metadata_output(self):
         """Open dialog to select metadata output file (Option A)."""
+        current_value = self._normalise_path(self.metadata_output_var.get())
+        initial_dir = str(Path(current_value).parent) if current_value else self._normalise_path(self.fda_dir_var.get()) or os.getcwd()
+        initial_file = Path(current_value).name if current_value else "metadata.csv"
         filename = filedialog.asksaveasfilename(
             title="Save Metadata CSV As",
+            initialdir=initial_dir,
+            initialfile=initial_file,
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
         )
         if filename:
-            self.metadata_output_var.set(filename)
+            self.metadata_output_var.set(self._normalise_path(filename))
     
     def browse_existing_metadata(self):
         """Open dialog to select existing metadata file (Option B)."""
@@ -410,13 +491,13 @@ class OCTAnalysisGUI:
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
         )
         if filename:
-            self.existing_metadata_var.set(filename)
+            self.existing_metadata_var.set(self._normalise_path(filename))
     
     def browse_results_dir(self):
         """Open dialog to select results output directory."""
         directory = filedialog.askdirectory(title="Select Results Output Directory")
         if directory:
-            self.results_dir_var.set(directory)
+            self.results_dir_var.set(self._normalise_path(directory))
     
     def log(self, message):
         """Add message to log window."""
@@ -443,6 +524,12 @@ class OCTAnalysisGUI:
     
     def validate_inputs(self):
         """Validate user inputs before running."""
+        # Normalise path-like fields first for cross-platform consistency.
+        self.fda_dir_var.set(self._normalise_path(self.fda_dir_var.get()))
+        self.metadata_output_var.set(self._normalise_path(self.metadata_output_var.get()))
+        self.existing_metadata_var.set(self._normalise_path(self.existing_metadata_var.get()))
+        self.results_dir_var.set(self._normalise_path(self.results_dir_var.get()))
+
         # Check metadata source: need EITHER Option A (FDA dir) OR Option B (existing CSV)
         fda_dir = self.fda_dir_var.get()
         existing_metadata = self.existing_metadata_var.get()
@@ -466,7 +553,7 @@ class OCTAnalysisGUI:
         
         # If using Option A, validate FDA directory
         if fda_dir and not existing_metadata:
-            if not Path(fda_dir).exists():
+            if not Path(fda_dir).exists() or not Path(fda_dir).is_dir():
                 messagebox.showerror("Error", f"FDA directory does not exist:\n{fda_dir}")
                 return False
             
@@ -474,6 +561,12 @@ class OCTAnalysisGUI:
             metadata_output = self.metadata_output_var.get()
             if not metadata_output:
                 messagebox.showerror("Error", "Please specify where to save extracted metadata (Option A)")
+                return False
+
+            try:
+                Path(metadata_output).parent.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                messagebox.showerror("Error", f"Cannot create metadata output folder:\n{Path(metadata_output).parent}\n\n{exc}")
                 return False
         
         # If using Option B, validate existing metadata
@@ -486,6 +579,12 @@ class OCTAnalysisGUI:
         results_dir = self.results_dir_var.get()
         if not results_dir:
             messagebox.showerror("Error", "Please specify Results Directory")
+            return False
+
+        try:
+            Path(results_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror("Error", f"Cannot create results directory:\n{results_dir}\n\n{exc}")
             return False
         
         # Check layer selection - at least one layer must be selected
@@ -574,7 +673,7 @@ class OCTAnalysisGUI:
                 self.log("="*80)
                 self.log(f"Using existing file: {existing_metadata}")
                 self.set_progress("Stage 1: Using existing metadata...")
-                metadata_file_for_stage2 = existing_metadata
+                metadata_file_for_stage2 = self._normalise_path(existing_metadata)
                 self.log("\n✓ Stage 1 complete (skipped extraction)")
             
             elif fda_dir:
@@ -592,7 +691,7 @@ class OCTAnalysisGUI:
                 self.log(f"Running: extract_metadata_batch({fda_dir!r}, {metadata_output!r}, workers={workers})\n")
 
                 # Run Stage 1 — direct function call with stdout captured to log
-                with keep_system_awake(True, reason="metadata extraction"):
+                with self._safe_keep_system_awake(True, reason="metadata extraction"):
                     success = self._run_with_stdout_capture(
                         extract_metadata_batch,
                         input_dir=fda_dir,
@@ -624,7 +723,7 @@ class OCTAnalysisGUI:
                     self.finish_pipeline()
                     return
                 
-                metadata_file_for_stage2 = metadata_output
+                metadata_file_for_stage2 = self._normalise_path(metadata_output)
                 self.log("\n✓ Stage 1 complete")
             
             # Check stop_event before starting Stage 2 — the user may have clicked
@@ -649,7 +748,7 @@ class OCTAnalysisGUI:
             self.log(f"Running: run_paired_analysis(layers={layers}, alignment={alignment_mode!r}, resume={resume})\n")
 
             # Run Stage 2 — direct function call with stdout captured to log
-            with keep_system_awake(True, reason="paired analysis"):
+            with self._safe_keep_system_awake(True, reason="paired analysis"):
                 success = self._run_with_stdout_capture(
                     run_paired_analysis,
                     metadata_csv=metadata_file_for_stage2,

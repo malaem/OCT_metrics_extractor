@@ -31,6 +31,7 @@ import argparse
 import sys
 import datetime
 import signal
+import os
 from multiprocessing import cpu_count
 
 from shared_resources.read_fda_file import read_fda_common_info
@@ -234,6 +235,8 @@ def extract_metadata_batch(
     print()
     
     # Find all FDA files
+    input_dir = os.path.normpath(os.path.expanduser(str(input_dir)))
+    output_csv = os.path.normpath(os.path.expanduser(str(output_csv)))
     print(f"Scanning directory: {input_dir}", flush=True)
     input_path = Path(input_dir)
     
