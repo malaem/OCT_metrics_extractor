@@ -18,6 +18,7 @@ Author: Marco Miranda
 Date: 28 May 2026
 """
 
+
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
