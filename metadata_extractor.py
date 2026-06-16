@@ -238,6 +238,8 @@ def extract_metadata_batch(
     # Find all FDA files
     input_dir = os.path.normpath(os.path.expanduser(str(input_dir)))
     output_csv = os.path.normpath(os.path.expanduser(str(output_csv)))
+    output_path = Path(output_csv)
+    stage1_error_log = output_path.with_name(f"{output_path.stem}_error_log.csv")
     print(f"Scanning directory: {input_dir}", flush=True)
     input_path = Path(input_dir)
     
@@ -264,6 +266,7 @@ def extract_metadata_batch(
     n_errors = 0
     n_skipped = 0
     error_files = []
+    error_rows = []
     stopped_early = False
     
     # Parallel processing with timeout protection for corrupted files.
@@ -312,9 +315,21 @@ def extract_metadata_batch(
                         else:
                             n_errors += 1
                             error_files.append(str(fda_file))
+                            error_rows.append({
+                                'filepath': str(fda_file),
+                                'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+                                'status': 'failed',
+                                'error_message': 'Metadata read returned None'
+                            })
                 except Exception as e:
                     n_errors += 1
                     error_files.append(str(fda_file))
+                    error_rows.append({
+                        'filepath': str(fda_file),
+                        'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+                        'status': 'exception',
+                        'error_message': f"{type(e).__name__}: {e}"
+                    })
                     print(f"  WARNING: Error reading {fda_file.name}: {e}", flush=True)
                 if i % 10 == 0:
                     status_parts = [f"success: {n_success}"]
@@ -336,6 +351,12 @@ def extract_metadata_batch(
                     exec_start_file.pop(future, None)
                     n_errors += 1
                     error_files.append(str(fda_file))
+                    error_rows.append({
+                        'filepath': str(fda_file),
+                        'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+                        'status': 'timeout',
+                        'error_message': f"Timeout after {PER_FILE_TIMEOUT}s"
+                    })
                     i += 1
                     last_progress_at = now
                     print(f"  WARNING: Timeout after {PER_FILE_TIMEOUT}s: {fda_file.name}", flush=True)
@@ -352,6 +373,12 @@ def extract_metadata_batch(
                 for future, fda_file in list(pending_file.items()):
                     error_files.append(str(fda_file))
                     n_errors += 1
+                    error_rows.append({
+                        'filepath': str(fda_file),
+                        'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+                        'status': 'stalled',
+                        'error_message': f"No progress for {NO_PROGRESS_TIMEOUT}s; task cancelled"
+                    })
                     i += 1
                     future.cancel()
                 pending_file.clear()
@@ -375,6 +402,12 @@ def extract_metadata_batch(
     if stopped_early:
         summary_parts.append("PARTIAL — stopped early")
     print(f"  Completed: {', '.join(summary_parts)}", flush=True)
+
+    # Write Stage 1-specific error log (separate from Stage 2's error_log.csv).
+    if error_rows:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(error_rows).to_csv(stage1_error_log, index=False)
+        print(f"  Stage 1 error log: {stage1_error_log}", flush=True)
 
     if stopped_early:
         print(
@@ -401,7 +434,6 @@ def extract_metadata_batch(
     
     # Write to CSV
     print(f"\nWriting metadata to: {output_csv}")
-    output_path = Path(output_csv)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     df.to_csv(output_csv, index=False)
